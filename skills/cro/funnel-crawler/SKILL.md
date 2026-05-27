@@ -45,7 +45,23 @@ Read `/workspace/patterns.md`. The navigation fixes are there — do not redisco
 
 ## Screenshots
 
-Take a screenshot after **every distinct screen** — a screen is distinct when the URL or main heading changes.
+Take a screenshot after **every distinct screen**.
+
+A screen is distinct when ANY of these change from the previous screenshot:
+- The URL
+- The main question or heading text
+- The visible answer options (button labels)
+
+On SPA quiz funnels the URL never changes between questions. Before deciding whether to screenshot, run this in `browser_console` to get the current screen fingerprint:
+```js
+(function(){
+  var q = (document.querySelector('h1,h2,h3,h4,h5,h6,[class*="question"],[class*="title"]')||{}).innerText||'';
+  var opts = Array.from(document.querySelectorAll('button')).slice(0,4).map(b=>b.innerText.trim()).join('|');
+  return (q.trim().slice(0,80) + '||' + opts.slice(0,80));
+})()
+```
+If the result differs from the last fingerprint you recorded → screenshot. If identical → skip.
+Track the last fingerprint yourself between steps.
 
 Run the `[[readiness-gate]]` from patterns.md before each screenshot. If not ready after one retry, screenshot anyway.
 
