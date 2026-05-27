@@ -1,7 +1,7 @@
 """
 quiz-funnel archetype base crawler.
 
-Generic loop — classify each screen, act, repeat.
+Generic loop — classify each screen, act, screenshot every distinct screen.
 No hardcoded steps. No site-specific knowledge.
 That lives in patterns.md and extensions.
 
@@ -19,42 +19,39 @@ from pathlib import Path
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
 
 
 EMAIL    = "qa+123@kilo.health"
 EMAIL_FB = "qa123@kilo.health"
 
-# Landmark screen names — when we see one, we take a screenshot
-LANDMARKS = {"landing", "email-gate", "plan-reveal", "checkout", "upsell"}
-
 
 class QuizFunnelCrawler:
     """
     Crawls a quiz-style funnel by classifying each screen and acting.
+    Screenshots every distinct screen — URL change or heading change.
     No hardcoded step sequence. Discovers the funnel at runtime.
 
     Subclasses may override:
-      - classify(dom)     → return screen type or None to use base logic
-      - act(screen_type)  → return False to fall back to base action
-      - is_done()         → return True to stop early (e.g. reached checkout)
+      - classify(dom)   → return screen type string, or None for base logic
+      - act(stype, dom) → return True if handled, False to fall back
+      - is_done()       → return True to stop early
     """
 
-    BUDGET   = 80     # max selenium actions
-    MAX_SAME = 5      # stop if URL unchanged after this many consecutive advances
+    BUDGET   = 80
+    MAX_SAME = 5   # stop if URL+heading unchanged this many consecutive loops
 
     def __init__(self, url, run_id, output_dir):
-        self.url        = url
-        self.run_id     = run_id
-        self.out        = Path(output_dir)
+        self.url          = url
+        self.run_id       = run_id
+        self.out          = Path(output_dir)
         self.out.mkdir(parents=True, exist_ok=True)
-        self.steps      = []
-        self.actions    = 0
-        self.driver     = None
-        self._t_start   = None
-        self._t_step    = None
-        self._seen_urls = []   # recent URL history for stuck detection
+        self.steps        = []
+        self.actions      = 0
+        self.driver       = None
+        self._t_start     = None
+        self._t_prev      = None
+        self._prev_sig    = None   # (url, heading) — detect distinct screens
+        self._same_count  = 0
 
     # ------------------------------------------------------------------
     # Entry point
@@ -73,7 +70,7 @@ class QuizFunnelCrawler:
         except _BudgetExhausted:
             print(f"[crawler] budget exhausted after {self.actions} actions")
         except _StuckDetected:
-            print(f"[crawler] stuck — URL unchanged {self.MAX_SAME} times, stopping")
+            print(f"[crawler] stuck — no progress after {self.MAX_SAME} loops")
         except Exception as e:
             print(f"[crawler] error: {e}")
         finally:
@@ -87,24 +84,74 @@ class QuizFunnelCrawler:
     def _crawl(self):
         self._goto(self.url)
         self._accept_cookies()
-        self._screenshot_if_landmark("landing")
+        self._maybe_screenshot()   # landing
 
         while not self._is_terminal():
             dom   = self._dom_signals()
             stype = self.classify(dom) or self._base_classify(dom)
-            acted = self.act(stype) if stype else False
-            if not acted:
+            handled = self.act(stype, dom)
+            if not handled:
                 self._base_act(stype, dom)
-            self._screenshot_if_landmark(stype)
-            self._check_stuck()
+            self._check_stuck(dom)
+            self._maybe_screenshot()   # screenshot if page changed
 
     # ------------------------------------------------------------------
-    # Classification — what kind of screen is this?
-    # Subclasses override classify() to intercept before base logic.
+    # Screenshot every distinct screen
+    # ------------------------------------------------------------------
+
+    def _screen_sig(self):
+        """Fingerprint for the current screen — URL + visible heading."""
+        url = self.driver.current_url
+        heading = self._js(
+            "return (document.querySelector('h1,h2,h3,h4,h5,h6,legend') || {}).innerText || ''"
+        ) or ""
+        return (url, heading.strip()[:120])
+
+    def _maybe_screenshot(self):
+        """Take a screenshot if this screen is distinct from the last one."""
+        sig = self._screen_sig()
+        if sig == self._prev_sig:
+            return
+        self._prev_sig = sig
+        url, heading = sig
+        name = self._screen_name(url, heading)
+        self._screenshot(name)
+
+    def _screen_name(self, url, heading):
+        """Derive a slug for the screenshot filename from the heading or URL."""
+        if heading:
+            slug = re.sub(r"[^a-z0-9]+", "-", heading.lower()).strip("-")[:40]
+            return slug or "screen"
+        # Fall back to last URL path segment
+        path = url.rstrip("/").split("/")[-1].split("?")[0]
+        return re.sub(r"[^a-z0-9]+", "-", path.lower()).strip("-")[:40] or "screen"
+
+    def _screenshot(self, name):
+        now       = time.monotonic()
+        elapsed   = round(now - self._t_start, 2)
+        step_took = round(now - self._t_prev, 2) if self._t_prev else elapsed
+        self._t_prev = now
+
+        n     = len(self.steps) + 1
+        fname = f"{n:02d}-{name}.png"
+        self.driver.save_screenshot(str(self.out / fname))
+        self.steps.append({
+            "step":           n,
+            "name":           name,
+            "url":            self.driver.current_url,
+            "screenshot":     fname,
+            "elapsed_s":      elapsed,
+            "step_took_s":    step_took,
+            "actions_so_far": self.actions,
+        })
+        print(f"  [{n:02d}] {name} | +{step_took}s | total {elapsed}s | {self.actions} actions")
+
+    # ------------------------------------------------------------------
+    # Classification
     # ------------------------------------------------------------------
 
     def classify(self, dom):
-        """Override to return a screen type string, or None to use base."""
+        """Override to intercept classification. Return string or None."""
         return None
 
     def _base_classify(self, dom):
@@ -115,46 +162,42 @@ class QuizFunnelCrawler:
             return "checkout"
         if any(x in url for x in ["/upsell", "/upgrade", "/offer"]):
             return "upsell"
-        if dom["has_email_input"]:
-            return "email-gate"
         if dom["has_payment_input"]:
             return "payment-form"
-        if any(x in text for x in ["your plan", "your weight", "you will reach", "by ", "lbs by", "kg by"]):
+        if dom["has_email_input"]:
+            return "email-gate"
+        if any(x in text for x in ["your plan", "you will reach", "lbs by", "kg by", "by july", "by august"]):
             return "plan-reveal"
+        if dom["has_name_input"]:
+            return "name-input"
         if dom["has_numeric_inputs"] and not dom["has_text_inputs"]:
             return "numeric-input"
         if dom["has_checkboxes"] and dom["continue_disabled"]:
             return "multi-select"
         if dom["has_photo_cards"]:
             return "photo-card-select"
-        if dom["has_radio_or_option_list"] and not dom["has_checkboxes"]:
+        if dom["has_option_list"]:
             return "single-select"
         if dom["has_continue"] and not dom["has_inputs"]:
             return "informational"
-        if dom["has_name_input"]:
-            return "name-input"
         return "unknown"
 
     # ------------------------------------------------------------------
-    # Actions — what to do for each screen type
-    # Subclasses override act() to intercept before base logic.
+    # Actions
     # ------------------------------------------------------------------
 
-    def act(self, stype):
-        """Override to handle a screen type. Return True if handled, False to fall back."""
+    def act(self, stype, dom):
+        """Override to intercept actions. Return True if handled, False to fall back."""
         return False
 
     def _base_act(self, stype, dom):
         if stype == "photo-card-select":
-            # Click the first card — sensible default for gender/age/body-type
             self._click_first_card()
 
         elif stype == "single-select":
-            # Click the first option
             self._click_first_option()
 
         elif stype == "multi-select":
-            # Select first checkbox then advance
             self._js("document.querySelectorAll('input[type=checkbox]')[0]?.click()")
             self._advance()
 
@@ -163,7 +206,7 @@ class QuizFunnelCrawler:
             self._advance()
 
         elif stype == "email-gate":
-            self._fill_email()
+            self._fill_email(EMAIL)
             self._check_any_checkbox()
             self._advance()
 
@@ -177,14 +220,10 @@ class QuizFunnelCrawler:
         elif stype in ("informational", "plan-reveal"):
             self._advance()
 
-        elif stype == "checkout":
-            pass  # terminal — stop looping
-
-        elif stype == "payment-form":
-            pass  # terminal
+        elif stype in ("checkout", "payment-form", "upsell"):
+            pass   # terminal — stop advancing
 
         else:
-            # Unknown — try advancing and see what happens
             self._advance()
 
     # ------------------------------------------------------------------
@@ -195,76 +234,49 @@ class QuizFunnelCrawler:
         if self.is_done():
             return True
         url = self.driver.current_url.lower()
-        return any(x in url for x in ["/checkout", "/payment", "/upsell", "/order", "/plans"])
+        return any(x in url for x in ["/checkout", "/payment", "/order", "/upsell"])
 
     def is_done(self):
-        """Override to add custom terminal conditions."""
         return False
 
     # ------------------------------------------------------------------
-    # Landmark screenshots
-    # ------------------------------------------------------------------
-
-    def _screenshot_if_landmark(self, stype):
-        if stype not in LANDMARKS:
-            return
-        # Don't double-screenshot the same landmark
-        if any(s["name"] == stype for s in self.steps):
-            return
-        self._screenshot(stype)
-
-    def _screenshot(self, name):
-        now  = time.monotonic()
-        elapsed  = round(now - self._t_start, 2)
-        step_took = round(now - self._t_step, 2) if self._t_step else elapsed
-        self._t_step = now
-
-        n     = len(self.steps) + 1
-        fname = f"{n:02d}-{name}.png"
-        self.driver.save_screenshot(str(self.out / fname))
-        self.steps.append({
-            "step":        n,
-            "name":        name,
-            "url":         self.driver.current_url,
-            "screenshot":  fname,
-            "elapsed_s":   elapsed,
-            "step_took_s": step_took,
-            "actions_so_far": self.actions,
-        })
-        print(f"  [{n:02d}] {name} | +{step_took}s | total {elapsed}s | {self.actions} actions")
-
-    # ------------------------------------------------------------------
-    # DOM signals — cheap signals for classification
+    # DOM signals
     # ------------------------------------------------------------------
 
     def _dom_signals(self):
         url  = self.driver.current_url
         text = self.driver.find_element(By.TAG_NAME, "body").text
         return {
-            "url":                  url,
-            "text":                 text[:2000],
-            "has_email_input":      bool(self.driver.find_elements(By.CSS_SELECTOR, "input[type='email']")),
-            "has_payment_input":    bool(self.driver.find_elements(By.CSS_SELECTOR, "input[name*='card'],input[name*='number'],iframe[name*='stripe']")),
-            "has_name_input":       bool(self.driver.find_elements(By.CSS_SELECTOR, "input[name='name'],input[placeholder*='name' i]")),
-            "has_numeric_inputs":   bool(self.driver.find_elements(By.CSS_SELECTOR, "input[type='number'],[role='spinbutton']")),
-            "has_text_inputs":      bool(self.driver.find_elements(By.CSS_SELECTOR, "input[type='text'],input[type='email']")),
-            "has_inputs":           bool(self.driver.find_elements(By.CSS_SELECTOR, "input,select,textarea")),
-            "has_checkboxes":       bool(self.driver.find_elements(By.CSS_SELECTOR, "input[type='checkbox']")),
-            "has_photo_cards":      self._has_photo_cards(),
-            "has_radio_or_option_list": bool(self.driver.find_elements(By.CSS_SELECTOR, "input[type='radio'],[role='radio'],[role='listitem'] button")),
-            "has_continue":         bool(self._find_continue()),
-            "continue_disabled":    self._continue_is_disabled(),
+            "url":               url,
+            "text":              text[:2000],
+            "has_email_input":   bool(self.driver.find_elements(By.CSS_SELECTOR, "input[type='email']")),
+            "has_payment_input": bool(self.driver.find_elements(By.CSS_SELECTOR,
+                "input[name*='card'],input[name*='number'],iframe[name*='stripe'],iframe[name*='braintree']")),
+            "has_name_input":    bool(self.driver.find_elements(By.CSS_SELECTOR,
+                "input[name='name'],input[placeholder*='name' i]")),
+            "has_numeric_inputs": bool(self.driver.find_elements(By.CSS_SELECTOR,
+                "input[type='number'],[role='spinbutton']")),
+            "has_text_inputs":   bool(self.driver.find_elements(By.CSS_SELECTOR,
+                "input[type='text'],input[type='email']")),
+            "has_inputs":        bool(self.driver.find_elements(By.CSS_SELECTOR, "input,select,textarea")),
+            "has_checkboxes":    bool(self.driver.find_elements(By.CSS_SELECTOR, "input[type='checkbox']")),
+            "has_photo_cards":   self._has_photo_cards(),
+            "has_option_list":   bool(self.driver.find_elements(By.CSS_SELECTOR,
+                "input[type='radio'],[role='radio'],[role='listitem'] button,[role='option']")),
+            "has_continue":      bool(self._find_continue()),
+            "continue_disabled": self._continue_is_disabled(),
         }
 
     def _has_photo_cards(self):
-        # Cards with images and clickable wrappers — typical quiz photo-card pattern
-        cards = self.driver.find_elements(By.CSS_SELECTOR, "button img, [role='button'] img, li img")
+        cards = self.driver.find_elements(By.CSS_SELECTOR,
+            "button img,[role='button'] img,li img,[class*='card'] img")
         return len(cards) >= 2
 
     def _find_continue(self):
         try:
             return self.driver.find_element(By.XPATH,
-                "//button[normalize-space()='Continue' or normalize-space()='Next' or normalize-space()='Continue →']")
+                "//button[normalize-space()='Continue' or normalize-space()='Next'"
+                " or normalize-space()='Continue →' or normalize-space()='Get started']")
         except Exception:
             return None
 
@@ -280,34 +292,29 @@ class QuizFunnelCrawler:
 
     def _accept_cookies(self):
         self._js("""
-            (function(){
-                var sel = 'button[id*=accept i],button[class*=accept i],button[aria-label*=accept i]';
-                var btn = document.querySelector(sel);
-                if(btn){ btn.click(); return 'accepted'; }
-                return 'none';
-            })()
+            var sel='button[id*=accept i],button[class*=accept i],button[aria-label*=accept i]';
+            var b=document.querySelector(sel);
+            if(b) b.click();
         """)
         time.sleep(0.3)
 
     def _advance(self):
-        """Try to click Continue/Next. Escalate to MouseEvent if plain click fails."""
         self._budget()
-        result = self._js("""
+        self._js("""
             (function(){
-                var b = Array.from(document.querySelectorAll('button'))
-                    .find(b => ['Continue','Next','Continue →'].includes(b.textContent.trim()) && !b.disabled);
-                if(!b) return 'not-found';
-                b.dispatchEvent(new MouseEvent('click',{bubbles:true,cancelable:true}));
-                return 'dispatched';
+                var b=Array.from(document.querySelectorAll('button'))
+                    .find(b=>['Continue','Next','Continue →','Get started']
+                        .includes(b.textContent.trim())&&!b.disabled);
+                if(b) b.dispatchEvent(new MouseEvent('click',{bubbles:true,cancelable:true}));
             })()
         """)
         self.actions += 1
         time.sleep(0.4)
-        return result
 
     def _click_first_card(self):
         self._budget()
-        cards = self.driver.find_elements(By.CSS_SELECTOR, "button img, [role='button'] img")
+        cards = self.driver.find_elements(By.CSS_SELECTOR,
+            "button img,[role='button'] img,[class*='card'] img")
         if cards:
             try:
                 cards[0].find_element(By.XPATH, "./..").click()
@@ -318,8 +325,8 @@ class QuizFunnelCrawler:
 
     def _click_first_option(self):
         self._budget()
-        # Try list item buttons first, then radio inputs
-        for sel in ["[role='listitem'] button", "input[type='radio']", "label"]:
+        for sel in ["[role='listitem'] button,[role='option']",
+                    "input[type='radio']", "label"]:
             els = self.driver.find_elements(By.CSS_SELECTOR, sel)
             if els:
                 try:
@@ -331,15 +338,17 @@ class QuizFunnelCrawler:
                     continue
 
     def _fill_numeric_defaults(self, dom):
-        inputs = self.driver.find_elements(By.CSS_SELECTOR, "input[type='number'],[role='spinbutton']")
+        inputs = self.driver.find_elements(By.CSS_SELECTOR,
+            "input[type='number'],[role='spinbutton']")
         defaults = ["5", "6", "165", "140", "35"]
         for i, inp in enumerate(inputs[:len(defaults)]):
             self._fill(inp, defaults[i])
 
-    def _fill_email(self):
-        inputs = self.driver.find_elements(By.CSS_SELECTOR, "input[type='email'],input[name='email']")
+    def _fill_email(self, email):
+        inputs = self.driver.find_elements(By.CSS_SELECTOR,
+            "input[type='email'],input[name='email']")
         if inputs:
-            self._fill(inputs[0], EMAIL)
+            self._fill(inputs[0], email)
             return True
         return False
 
@@ -368,13 +377,18 @@ class QuizFunnelCrawler:
         if self.actions >= self.BUDGET:
             raise _BudgetExhausted()
 
-    def _check_stuck(self):
-        url = self.driver.current_url
-        self._seen_urls.append(url)
-        if len(self._seen_urls) > self.MAX_SAME:
-            self._seen_urls.pop(0)
-        if len(self._seen_urls) == self.MAX_SAME and len(set(self._seen_urls)) == 1:
-            raise _StuckDetected()
+    def _check_stuck(self, dom):
+        sig = (dom["url"], dom["text"][:100])
+        if not hasattr(self, "_last_stuck_sig"):
+            self._last_stuck_sig = None
+            self._same_count = 0
+        if sig == self._last_stuck_sig:
+            self._same_count += 1
+            if self._same_count >= self.MAX_SAME:
+                raise _StuckDetected()
+        else:
+            self._last_stuck_sig = sig
+            self._same_count = 0
 
     # ------------------------------------------------------------------
     # Output
@@ -401,13 +415,13 @@ class QuizFunnelCrawler:
             "archetype":  self.__class__.__name__,
 
             "timing": {
-                "total_s":          total_s,
-                "total_actions":    self.actions,
-                "budget":           self.BUDGET,
-                "budget_used_pct":  round(self.actions / self.BUDGET * 100, 1),
-                "slowest_step":     slowest.get("name"),
-                "slowest_step_s":   slowest.get("step_took_s", 0),
-                "steps":            timing,
+                "total_s":         total_s,
+                "total_actions":   self.actions,
+                "budget":          self.BUDGET,
+                "budget_used_pct": round(self.actions / self.BUDGET * 100, 1),
+                "slowest_step":    slowest.get("name"),
+                "slowest_step_s":  slowest.get("step_took_s", 0),
+                "steps":           timing,
             },
 
             "funnel_steps": [
@@ -433,9 +447,9 @@ class QuizFunnelCrawler:
         print(f"  run_id       {self.run_id}")
         print(f"  url          {self.url}")
         print(f"  total time   {total_s}s")
+        print(f"  screenshots  {len(self.steps)}")
         print(f"  actions      {self.actions}/{self.BUDGET} ({data['timing']['budget_used_pct']}%)")
-        print(f"  landmarks    {len(self.steps)}")
-        print(f"  slowest      {slowest.get('name')} ({slowest.get('step_took_s',0)}s)")
+        print(f"  slowest      {slowest.get('name')} ({slowest.get('step_took_s', 0)}s)")
         print(f"  checkout     {'✓' if checkout_reached else '✗'}")
         print(f"  output       {path}")
         print(f"{'─'*52}\n")

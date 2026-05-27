@@ -159,7 +159,39 @@ This is mandatory — the run is a failure if `crawl.json` isn't on disk.
 
 ## After the run
 
-Read `/workspace/patterns.md` first. Append new transferable patterns after. Confirm existing entries that helped (bump confidence). The patterns.md preamble has the rules on what belongs and what doesn't.
+### 1. Update patterns.md
+Append new transferable navigation patterns. Confirm entries that helped.
+Never put site-specific facts here — only cross-site tactics.
+
+### 2. Write or update the domain extension
+After any PATH C manual crawl, write `/workspace/extensions/{domain}.py`.
+
+- Import the closest matching archetype base class
+- Override only `classify()` and `act()` — only for things that genuinely
+  differ from the base behaviour
+- Keep it under 60 lines. If it's longer, you're putting too much in it.
+
+### 3. Generalise — the self-improving step
+After writing the extension, do this:
+
+1. Read all files in `/workspace/extensions/` and `/workspace/archetypes/`
+2. Ask: does my new extension share substantial logic with an existing
+   extension, and there's no archetype covering that logic yet?
+   - **Yes** → extract the shared parts into a new archetype in
+     `/workspace/archetypes/{name}.py`. Refactor both extensions to
+     import and extend it. The new archetype should work generically for
+     any site of that type — no site-specific code in the archetype.
+   - **No, it matches an existing archetype** → make sure the extension
+     imports and extends that archetype. Delete any duplicated logic.
+   - **No overlap at all** → leave as standalone for now.
+3. Update the archetype entry in `patterns.md`:
+   - Add `{domain}` to `confirmed_on`
+   - Set `confidence` to `0.5` on first confirmation, `+0.1` per
+     subsequent successful run, `-0.3` on failure
+
+The goal: archetypes stay generic, extensions stay thin, confidence
+scores stay honest. After enough runs, PATH B fires reliably and the
+LLM only touches novel sites.
 
 Never edit this file or anything under `skills/cro/`.
 
