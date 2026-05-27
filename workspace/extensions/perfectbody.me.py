@@ -2,80 +2,43 @@
 Extension: perfectbody.me
 Archetype: quiz-funnel
 
-Overrides only the steps that differ from the base.
+Only overrides what actually differs from the generic loop.
 Generated after first manual crawl. Update when the site changes.
 """
 
 import sys, time, json
 sys.path.insert(0, "/workspace/archetypes")
 
-from quiz_funnel import QuizFunnelCrawler
+from quiz_funnel import QuizFunnelCrawler, EMAIL_FB
 from selenium.webdriver.common.by import By
 
 
 class PerfectBodyCrawler(QuizFunnelCrawler):
 
-    # perfectbody rejects + in email addresses
-    EMAIL = "qa123@kilo.health"
+    def classify(self, dom):
+        # Ingredients page: has checkboxes but Continue is not disabled
+        # — base would call it unknown. Override to catch it.
+        if "ingredient" in dom["url"].lower() or "ingredient" in dom["text"].lower():
+            return "ingredients"
+        return None  # fall through to base classify
 
-    def step_entry(self):
-        # Photo card buttons — click Female card directly
-        self._click_text(["Female"])
+    def act(self, stype):
+        if stype == "email-gate":
+            # perfectbody rejects + in email addresses
+            inputs = self.driver.find_elements(By.CSS_SELECTOR, "input[type='email']")
+            if inputs:
+                self._fill(inputs[0], EMAIL_FB)
+            self._check_any_checkbox()
+            self._advance()
+            return True
 
-    def step_target_areas(self):
-        # Multi-select body diagram — DOM-direct click on first checkbox then advance
-        self._js("document.querySelectorAll('input[type=checkbox]')[0]?.click()")
-        self._continue()
+        if stype == "ingredients":
+            # "Select everything" checkbox at top
+            self._js("document.querySelector('input[type=checkbox]')?.click()")
+            self._advance()
+            return True
 
-    def step_habits(self):
-        # Inner checkbox DOM click required — wrapper click doesn't register in React
-        self._js("document.querySelectorAll('input[type=checkbox]')[0]?.click()")
-        self._continue()
-
-    def step_ingredients(self):
-        # "Select everything" toggle at top of ingredient list
-        self._click_text(["Select everything"])
-        self._continue()
-
-    def step_email_gate(self):
-        self.screenshot("email-gate")
-        self._fill_email(self.EMAIL)
-        self._js("document.querySelector('input[type=checkbox]')?.click()")
-        self._continue()
-
-    def step_plan_reveal(self):
-        # Two informational inserts appear before the actual plan reveal
-        for _ in range(3):
-            url_before = self.driver.current_url
-            self._continue()
-            time.sleep(0.3)
-        self.screenshot("plan-reveal")
-        self._continue()
-
-    def step_checkout(self):
-        self.screenshot("checkout")
-        # Extract plan data while we're here
-        try:
-            plans_raw = self._js("""
-                return Array.from(document.querySelectorAll('[class*="plan" i],[class*="Plan"]'))
-                    .map(el => el.innerText.trim())
-                    .filter(t => t.length > 5)
-                    .slice(0, 6)
-            """)
-            if plans_raw:
-                self._write_checkout_plans(plans_raw)
-        except Exception:
-            pass
-
-    def _write_checkout_plans(self, raw):
-        import re
-        out_path = self.out / "crawl.json"
-        if not out_path.exists():
-            return
-        data = json.loads(out_path.read_text())
-        # Store raw text — the analyst will parse it
-        data["checkout"]["plans_raw"] = raw
-        out_path.write_text(json.dumps(data, indent=2))
+        return False  # everything else handled by base
 
 
 if __name__ == "__main__":
