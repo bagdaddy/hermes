@@ -1,143 +1,85 @@
 ---
-
-## name: funnel-crawler description: Walk a funnel entry → checkout. One screenshot per visually distinct step. Write crawl.json. Tactics live in /workspace/patterns.md. tags: \[browser, screenshots, funnel, contract\]
+name: funnel-crawler
+description: Walk a website funnel to signup or purchase. Screenshot every distinct step. Write crawl.json.
+tags: [browser, screenshots, funnel, contract]
+---
 
 # Funnel Crawler
 
-> **Contract file. Do not edit it from inside a run.** Tactics evolve in `/workspace/patterns.md` (agent-writable). Heuristic scripts live in `/workspace/archetypes/` and `/workspace/extensions/` (agent-writable).
+> Contract file. Do not edit from inside a run. Navigation tactics in `/workspace/patterns.md`.
 
-## Step 0 — pick your execution path
+## Goal
 
-Extract `{domain}` from `{url}` (hostname only, e.g. `perfectbody.me`).
+Walk the user journey from `{url}` to the first **signup or purchase completion** screen you can reach. Screenshot every distinct step along the way.
 
-Check in order — use the **first** that applies:
+You are looking for two terminal destinations in priority order:
+1. **Purchase** — payment form, plan selection, checkout, order confirmation
+2. **Signup** — account creation form, email+password, registration confirmation
 
-### A. Domain extension exists (fastest)
-```bash
-ls /workspace/extensions/{domain}.py
-```
-If found:
-```bash
-python /workspace/extensions/{domain}.py \
-  --url "{url}" --run_id "{run_id}" --output_dir "${CRAWL_OUTPUT_DIR}/{run_id}"
-```
-Verify `crawl.json` was written. If yes → jump to **Always emit crawl.json**. If the script errored → fall through to B.
+Stop when you reach one. If neither is reachable (auth wall, bot block, out of budget), stop and write what you have.
 
-### B. Known archetype match (fast)
-Check `/workspace/patterns.md` archetypes section. Take one `browser_snapshot` of the landing page to confirm the fingerprint. If a match with confidence > 0 is found:
-```bash
-python /workspace/archetypes/{archetype}.py \
-  --url "{url}" --run_id "{run_id}" --output_dir "${CRAWL_OUTPUT_DIR}/{run_id}"
-```
-Watch for steps that fail. Handle them manually, then **write a domain extension** capturing the delta before finishing.
+## Before you start
 
-### C. Full manual crawl (slow — only when A and B don't apply)
+Read `/workspace/patterns.md`. The navigation fixes are there — do not rediscover them.
 
-Read `/workspace/patterns.md` end-to-end before the first browser action.
+## How to navigate
 
-1. `mkdir -p "${CRAWL_OUTPUT_DIR}/{run_id}"`
-2. `browser_navigate` to `{url}`
-3. Accept cookie banner (always first — see `cookie-banner-blocks-interaction`)
-4. Follow the primary path to checkout. Defaults:
-   - Age 30-39 · Goal: Lose weight · Body: Plump · Activity: Desk job
-   - Height 5ft6 · Weight 165lbs · Target 140lbs · Numeric age 35
-   - Email `qa+123@kilo.health` (fallback `qa123@kilo.health` if + rejected)
-   - Name `Auditor`
-5. Navigation only: `browser_snapshot` + `browser_click`. Never `browser_vision` for navigation.
-6. Stuck? Check `patterns.md` first — the fix is probably already there.
-7. Budget: ≤ 80 `browser_navigate`/`browser_click`/`browser_type` actions total.
+- `browser_snapshot` + `browser_click` for all navigation. Never `browser_vision` for navigation.
+- Accept cookie banner before anything else.
+- At every choice, pick the most common/default option and keep moving. Don't explore branches.
+- Stuck? Check `patterns.md` before trying anything else.
+- Budget: ≤ 80 `browser_navigate` + `browser_click` + `browser_type` combined. If exhausted, write what you have and stop.
 
-Screenshots (use `browser_vision` + run `[[readiness-gate]]` from patterns.md first):
+**Defaults for any form fields:**
+- Age: 30-39
+- Goal: Lose weight / most prominent option
+- Body type: middle option
+- Activity: Desk job / sedentary
+- Height: 5ft6 / 168cm
+- Weight: 165lbs / 75kg
+- Target weight: 140lbs / 63kg
+- Numeric age: 35
+- Email: `qa+123@kilo.health` (fallback: `qa123@kilo.health` if + rejected)
+- Name: Auditor
+- Password: Auditor123!
 
-| Landmark | Filename |
-|----------|----------|
-| Landing page | `01-landing.png` |
-| First quiz/entry screen | `02-quiz-entry.png` |
-| Email gate | `03-email-gate.png` |
-| Plan reveal / forecast | `04-plan-reveal.png` |
-| Checkout / pricing | `05-checkout.png` |
-| Post-purchase upsell (if present) | `06-upsell.png` |
+## Screenshots
 
-`cp {screenshot_path} "${CRAWL_OUTPUT_DIR}/{run_id}/{filename}"` after each `browser_vision`.
+Take a screenshot after **every distinct screen** — a screen is distinct when the URL or main heading changes.
 
-After a successful manual crawl, **always write a domain extension**:
-```
-/workspace/extensions/{domain}.py
-```
-Import the closest archetype base class. Override only the steps that differed. Keep it under 100 lines.
+Run the `[[readiness-gate]]` from patterns.md before each screenshot. If not ready after one retry, screenshot anyway.
 
-## What you're producing
+Filename: `{N:02d}-{heading-slug}.png` where N is 1-based and the slug is the main heading lowercased with spaces replaced by hyphens. If no heading, use the URL path segment.
 
-Capturing up to 50 unique user-journey defining screenshots from a given URL. Produce:
+Copy each screenshot immediately: `cp {screenshot_path} "${CRAWL_OUTPUT_DIR}/{run_id}/{filename}"`
 
-- `crawl.json` describing the walk (schema below).
-- Screenshots of each page
+## Output schema
 
-Both land in `${CRAWL_OUTPUT_DIR}/{run_id}/`.
-
-## Budget
-
-| Resource | Limit |
-| --- | --- |
-| `browser_vision` | one per visually distinct step — no upper cap |
-| `browser_navigate` + `browser_click` + `browser_type` | ≤ 80 combined |
-| `browser_snapshot`, `browser_console` | unbounded |
-| Wall-clock target | < 5 min |
-
-If you exhaust the navigate/click/type budget or the wall-clock target, write whatever `crawl.json` you have and stop.
-
-## Screenshot Definition of Done
-
-A screenshot is a defect unless ALL of these hold:
-
-- Full page, not viewport-only.
-- All images loaded and decoded (no placeholders / LQIPs / broken icons).
-- No skeleton loaders, spinners, or "loading…" text visible.
-- No mid-flight animations (carousels mid-rotate, count-ups mid-tick).
-- Layout stable — no further reflow.
-
-Crawler should capture the loaders and other stuff as insight (what happened after I clicked X, etc.).
-
-How you verify these is up to you. `/workspace/patterns.md` has a known-working readiness gate (\[\[readiness-gate\]\]) you can use or improve.
-
-## Tools at your disposal
-
-You have the full Hermes toolset. The ones that matter here, and when:
-
-| Tool | When to reach for it |
-| --- | --- |
-| `browser_snapshot` | Read the page DOM. Cheap; use freely. Refs from a snapshot go stale after any DOM-mutating action — re-snapshot before each interaction. |
-| `browser_click` / `browser_type` | Single interactions. |
-| `browser_console` | Run JS — readiness gate, content extraction, force-clicks (DOM-direct, `MouseEvent` dispatch). |
-| `browser_scroll` | Built-in scroll. Prefer over `window.scrollTo` JS where possible. |
-| `browser_get_images` | Inventory page images without DIY JS. |
-| `browser_vision` | Screenshots **only**. Each call also spends a hidden LLM turn on visual analysis you don't need — keep it for screenshot moments. |
-| `delegate_task` | Up to 3 parallel subagents. Useful for splitting independent work; rarely helpful for a single linear funnel walk. |
-| `execute_code` | **Does NOT expose** `browser_*` **tools.** Sandbox allow-list is `web_search`, `web_extract`, `read_file`, `write_file`, `search_files`, `patch`, `terminal`. 300s sandbox timeout. Use it for post-walk processing — e.g. assembling `crawl.json` from a list of step records, or batch-extracting plan data from saved HTML. Don't use it to walk the funnel. |
-| `write_file` | The way crawl.json reaches disk. Calling it is mandatory. Don't paste JSON into chat as a substitute. |
-| `terminal` | Run heuristic scripts: `python /workspace/extensions/{domain}.py ...` or `python /workspace/archetypes/{archetype}.py ...` |
-
-**Try to be as fast as possible. Look for ways to advance in the user journey and find all terminal pages (register/login/payments/signup forms). Ideally we find all, but if not, signup + payments is good enough for most ecommerce websites.**
-
-## Test credentials
-
-Email gates: use `qa+123@kilo.health`. Fallback `qa123@kilo.health` if the funnel rejects `+`. Never use placeholder addresses.
-
-## Output schema — `${CRAWL_OUTPUT_DIR}/{run_id}/crawl.json`
+Write `${CRAWL_OUTPUT_DIR}/{run_id}/crawl.json` using `write_file`:
 
 ```json
 {
   "run_id": "",
   "url": "",
   "crawled_at": "",
+  "funnel_type": "purchase | signup | unknown",
   "funnel_steps": [
-    {"step": 1, "name": "landing",         "screenshot": "01-landing.png"},
-    {"step": 2, "name": "quiz-q1-goals",   "screenshot": "02-quiz-q1-goals.png"},
-    {"step": 3, "name": "quiz-q2-veggies", "screenshot": "03-quiz-q2-veggies.png"}
+    {
+      "step": 1,
+      "name": "heading-slug",
+      "url": "",
+      "screenshot": "01-heading-slug.png"
+    }
   ],
+  "terminal": {
+    "reached": true,
+    "type": "purchase | signup | none",
+    "url": "",
+    "screenshot": ""
+  },
   "checkout": {
     "reached": true,
-    "plans": [{"name":"","original_price":"","sale_price":"","per_day_price":"","billing_period":"","badge":""}],
+    "plans": [{"name": "", "original_price": "", "sale_price": "", "per_day_price": "", "billing_period": "", "badge": ""}],
     "urgency_tactics": [],
     "trust_signals": [],
     "cta_text": "",
@@ -146,57 +88,16 @@ Email gates: use `qa+123@kilo.health`. Fallback `qa123@kilo.health` if the funne
 }
 ```
 
-Field names are fixed. `funnel_steps` is variable length — one entry per visually distinct step the crawler encountered. Step number is the 1-based index; screenshot filename uses the same 2-digit prefix (`01-`, `02-`, …) + the step's `name`.
+**This file is mandatory.** Write it even on failure with whatever steps completed. Set `terminal.reached = false` and `checkout.reached = false` if not reached.
 
-## Always emit crawl.json
-
-This is mandatory — the run is a failure if `crawl.json` isn't on disk.
-
-- Use the `write_file` tool. Path: `${CRAWL_OUTPUT_DIR}/{run_id}/crawl.json`. Pasting the JSON into a chat message is **not** writing the file.
-- Write it even on timeout, budget exhaustion, or any failure — with whatever steps you completed. Set `checkout.reached = false` if you didn't get there.
-- Reserve budget for this. Plan to call `write_file` while you still have headroom; don't let it slip behind a wall of last-minute clicks.
-- If `{callback_url}` is non-empty, POST the file body to it after writing. Otherwise skip the POST.
+If `{callback_url}` is non-empty, POST the file after writing.
 
 ## After the run
 
-### 1. Update patterns.md
-Append new transferable navigation patterns. Confirm entries that helped.
-Never put site-specific facts here — only cross-site tactics.
-
-### 2. Write or update the domain extension
-After any PATH C manual crawl, write `/workspace/extensions/{domain}.py`.
-
-- Import the closest matching archetype base class
-- Override only `classify()` and `act()` — only for things that genuinely
-  differ from the base behaviour
-- Keep it under 60 lines. If it's longer, you're putting too much in it.
-
-### 3. Generalise — the self-improving step
-After writing the extension, do this:
-
-1. Read all files in `/workspace/extensions/` and `/workspace/archetypes/`
-2. Ask: does my new extension share substantial logic with an existing
-   extension, and there's no archetype covering that logic yet?
-   - **Yes** → extract the shared parts into a new archetype in
-     `/workspace/archetypes/{name}.py`. Refactor both extensions to
-     import and extend it. The new archetype should work generically for
-     any site of that type — no site-specific code in the archetype.
-   - **No, it matches an existing archetype** → make sure the extension
-     imports and extends that archetype. Delete any duplicated logic.
-   - **No overlap at all** → leave as standalone for now.
-3. Update the archetype entry in `patterns.md`:
-   - Add `{domain}` to `confirmed_on`
-   - Set `confidence` to `0.5` on first confirmation, `+0.1` per
-     subsequent successful run, `-0.3` on failure
-
-The goal: archetypes stay generic, extensions stay thin, confidence
-scores stay honest. After enough runs, PATH B fires reliably and the
-LLM only touches novel sites.
-
-Never edit this file or anything under `skills/cro/`.
+Append any new navigation patterns to `/workspace/patterns.md`. Only cross-site tactics — nothing site-specific.
 
 ## Inputs
 
 - `{url}` — entry URL
 - `{run_id}` — output dir key
-- `{callback_url}` — POST `crawl.json` here (may be empty)
+- `{callback_url}` — POST crawl.json here (may be empty)
