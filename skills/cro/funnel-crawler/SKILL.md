@@ -45,23 +45,13 @@ Read `/workspace/patterns.md`. The navigation fixes are there — do not redisco
 
 ## Screenshots
 
-Take a screenshot after **every distinct screen**.
+Take a `browser_vision` screenshot after **every single `browser_click`, `browser_type`, and `browser_navigate`** — no exceptions, no skipping.
 
-A screen is distinct when ANY of these change from the previous screenshot:
-- The URL
-- The main question or heading text
-- The visible answer options (button labels)
+Do not try to detect whether the screen changed. Just screenshot every time. Duplicate screenshots are fine. Missing screenshots are not.
 
-On SPA quiz funnels the URL never changes between questions. Before deciding whether to screenshot, run this in `browser_console` to get the current screen fingerprint:
-```js
-(function(){
-  var q = (document.querySelector('h1,h2,h3,h4,h5,h6,[class*="question"],[class*="title"]')||{}).innerText||'';
-  var opts = Array.from(document.querySelectorAll('button')).slice(0,4).map(b=>b.innerText.trim()).join('|');
-  return (q.trim().slice(0,80) + '||' + opts.slice(0,80));
-})()
-```
-If the result differs from the last fingerprint you recorded → screenshot. If identical → skip.
-Track the last fingerprint yourself between steps.
+Filename: `{N:02d}-{slug}.png` where N increments from 01 and slug is derived from the current main heading or URL path, lowercased, spaces to hyphens, max 40 chars.
+
+Copy immediately after each vision call: `cp {screenshot_path} "${CRAWL_OUTPUT_DIR}/{run_id}/{filename}"`
 
 Run the `[[readiness-gate]]` from patterns.md before each screenshot. If not ready after one retry, screenshot anyway.
 
