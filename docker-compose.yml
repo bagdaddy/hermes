@@ -1,0 +1,20 @@
+services:
+  hermes-cro:
+    build: .
+    container_name: hermes-cro-agent
+    env_file: .env
+    ports:
+      - "${WEBHOOK_PORT:-8644}:8644"
+    volumes:
+      - ./crawls:/crawls
+      # Skills are the contract — read-only inside the container so a
+      # rogue agent can't rewrite them mid-run.
+      - ./skills:/root/.hermes/skills:ro
+      - ./workspace:/workspace
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8644/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s

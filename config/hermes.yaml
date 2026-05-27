@@ -1,0 +1,16 @@
+provider: anthropic
+model: claude-sonnet-4-6
+
+platforms:
+  webhook:
+    enabled: true
+    extra:
+      host: "0.0.0.0"
+      port: "${WEBHOOK_PORT}"
+      secret: "${WEBHOOK_SECRET}"
+
+toolsets:
+  - browser
+  - web
+  - file
+  - terminal
